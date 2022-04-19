@@ -69,47 +69,143 @@ pkcs11_lib_ctx_ptr pkcs11_get_context(void)
 
 CK_RV pkcs11_lock_context(pkcs11_lib_ctx_ptr pContext)
 {
-    CK_RV rv = CKR_ARGUMENTS_BAD;
+    CK_RV rv = CKR_CANT_LOCK;
 
 //    PKCS11_DEBUG("%p\r\n", pkcs11_context.lock_mutex);
 
-    if (pContext)
+    if (!pContext)
     {
-        if (pContext->lock_mutex)
+        return CKR_ARGUMENTS_BAD;
+    }
+
+
+    if (pContext->lock_mutex)
+    {
+        rv = pContext->lock_mutex(pContext->mutex);
+        if (rv)
         {
-            rv = pContext->lock_mutex(pContext->mutex);
-        }
-        else
-        {
-            rv = CKR_CANT_LOCK;
+            return rv;
         }
     }
+#if PKCS11_OS_MUTEX_ALWAYS
+    // OS mutex always locked after custom mutex locked
+    rv = pkcs11_os_lock_mutex(pContext->os_mutex);
+    if (rv)
+    {
+        // if error occurs, lock neither
+        if (pContext->lock_mutex && pContext->unlock_mutex)
+        {
+            pContext->unlock_mutex(pContext->mutex);
+        }
+    }
+#endif
+
     return rv;
 }
 
 CK_RV pkcs11_unlock_context(pkcs11_lib_ctx_ptr pContext)
 {
-    CK_RV rv = CKR_CRYPTOKI_NOT_INITIALIZED;
+    CK_RV rv = CKR_OK;
 
 //    PKCS11_DEBUG("%p\r\n", pkcs11_context.unlock_mutex);
 
     if (!pContext)
     {
         pContext = pkcs11_get_context();
+        if (!pContext)
+        {
+            return CKR_CRYPTOKI_NOT_INITIALIZED;
+        }
     }
 
-    if (pContext)
+#if PKCS11_OS_MUTEX_ALWAYS
+    // OS mutex must always be unlocked before custom mutex
+    // if an unexpected error occurs, still release other mutex
+    rv = pkcs11_os_unlock_mutex(pContext->os_mutex);
+#endif
+    if (pContext->unlock_mutex)
     {
-        if (pContext->unlock_mutex)
+        CK_RV rv2 = pContext->unlock_mutex(pContext->mutex);
+        if (rv2)
         {
-            rv = pContext->unlock_mutex(pContext->mutex);
-        }
-        else
-        {
-            rv = CKR_CANT_LOCK;
+            rv = rv2;
         }
     }
+#if !PKCS11_OS_MUTEX_ALWAYS
+    else
+    {
+        rv = CKR_CANT_LOCK;
+    }
+#endif
 
+    return rv;
+}
+
+static bool pkcs11_has_mutex(pkcs11_lib_ctx_ptr pContext)
+{
+#if PKCS11_OS_MUTEX_ALWAYS
+    return pContext->mutex != NULL || pContext->os_mutex != NULL;
+#else
+    return pContext->mutex != NULL;
+#endif
+}
+
+static CK_RV pkcs11_destroy_mutex(pkcs11_lib_ctx_ptr pContext)
+{
+    CK_RV rv = CKR_OK;
+    if (!pContext)
+    {
+        return CKR_ARGUMENTS_BAD;
+    }
+
+#if PKCS11_OS_MUTEX_ALWAYS
+    if (pContext->os_mutex)
+    {
+        rv = pkcs11_os_destroy_mutex(pContext->os_mutex);
+    }
+    if (pContext->destroy_mutex && pContext->mutex)
+    {
+        CK_RV rv2 = pContext->destroy_mutex(pContext->mutex);
+        if (rv2)
+        {
+            rv = rv2;
+        }
+    }
+#else
+    if (pContext->destroy_mutex && pContext->mutex)
+    {
+        rv = pContext->unlock_mutex(pContext->mutex);
+    }
+#endif
+
+    return rv;
+}
+
+static CK_RV pkcs11_create_mutex(pkcs11_lib_ctx_ptr pContext)
+{
+    CK_RV rv = CKR_OK;
+    if (!pContext)
+    {
+        return CKR_ARGUMENTS_BAD;
+    }
+
+    if (pContext->create_mutex)
+    {
+        rv = pContext->create_mutex(&pContext->mutex);
+        if (rv)
+        {
+            pContext->mutex = NULL;
+            return rv;
+        }
+    }
+#if PKCS11_OS_MUTEX_ALWAYS
+    rv = pkcs11_os_create_mutex(&pContext->os_mutex);
+    if (rv)
+    {
+        pContext->os_mutex = NULL;
+        pkcs11_destroy_mutex(pContext);
+    }
+#endif
     return rv;
 }
 
@@ -196,6 +292,7 @@ CK_RV pkcs11_init(CK_C_INITIALIZE_ARGS_PTR pInitArgs)
             lib_ctx->lock_mutex = pInitArgs->LockMutex;
             lib_ctx->unlock_mutex = pInitArgs->UnlockMutex;
         }
+#if !PKCS11_OS_MUTEX_ALWAYS
         else
         {
             /* Means we need to use native calls */
@@ -204,6 +301,7 @@ CK_RV pkcs11_init(CK_C_INITIALIZE_ARGS_PTR pInitArgs)
             lib_ctx->lock_mutex = pkcs11_os_lock_mutex;
             lib_ctx->unlock_mutex = pkcs11_os_unlock_mutex;
         }
+#endif
     }
 
     /* Only need to check if our library needs to create threads */
@@ -214,34 +312,34 @@ CK_RV pkcs11_init(CK_C_INITIALIZE_ARGS_PTR pInitArgs)
     }
 
     /* Perform library initialization steps */
-    if (lib_ctx->create_mutex)
+    rv = pkcs11_create_mutex(lib_ctx);
+    if (rv)
     {
-        if (lib_ctx->create_mutex(&lib_ctx->mutex))
-        {
-            PKCS11_DEBUG("Create Failed\r\n");
-            return CKR_CANT_LOCK;
-        }
+        PKCS11_DEBUG("Create Failed\r\n");
+        return CKR_CANT_LOCK;
     }
 
     /* Lock the library mutex */
-    if (lib_ctx->lock_mutex)
+    if (pkcs11_has_mutex(lib_ctx))
     {
-        if (lib_ctx->lock_mutex(lib_ctx->mutex))
+        if (pkcs11_lock_context(lib_ctx))
         {
             PKCS11_DEBUG("Lock Failed\r\n");
-            return CKR_CANT_LOCK;
+            rv = CKR_CANT_LOCK;
         }
     }
 
-    /* Initialize the Crypto device */
-    lib_ctx->slots = pkcs11_slot_initslots(PKCS11_MAX_SLOTS_ALLOWED);
-    if (lib_ctx->slots)
+    if (CKR_OK == rv)
     {
-        lib_ctx->slot_cnt = PKCS11_MAX_SLOTS_ALLOWED;
+        /* Initialize the Crypto device */
+        lib_ctx->slots = pkcs11_slot_initslots(PKCS11_MAX_SLOTS_ALLOWED);
+        if (lib_ctx->slots)
+        {
+            lib_ctx->slot_cnt = PKCS11_MAX_SLOTS_ALLOWED;
+        }
+        /* Set up a slot with a configuration */
+        rv = pkcs11_slot_config(0);
     }
-
-    /* Set up a slot with a configuration */
-    rv = pkcs11_slot_config(0);
 
     if (CKR_OK == rv)
     {
@@ -255,11 +353,18 @@ CK_RV pkcs11_init(CK_C_INITIALIZE_ARGS_PTR pInitArgs)
     }
 
     /* UnLock the library mutex */
-    if (lib_ctx->unlock_mutex)
+    if (pkcs11_has_mutex(lib_ctx))
     {
-        if (lib_ctx->unlock_mutex(lib_ctx->mutex))
+        if (pkcs11_unlock_context(lib_ctx))
         {
-            return CKR_CANT_LOCK;
+	    if (!rv)
+            {
+                rv = CKR_CANT_LOCK;
+            }
+        }
+        if (!lib_ctx->initialized)
+        {
+            pkcs11_destroy_mutex(lib_ctx);
         }
     }
 
@@ -307,6 +412,8 @@ CK_RV pkcs11_deinit(CK_VOID_PTR pReserved)
     /** \todo If other threads are waiting for something to happen this call should
        cause those calls to unblock and return CKR_CRYPTOKI_NOT_INITIALIZED - How
        that is done by this simplified mutex API is yet to be determined */
+
+    /** \todo call destroy mutex? */
 
     pkcs11_context.initialized = FALSE;
 

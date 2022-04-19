@@ -44,6 +44,9 @@ typedef struct _pkcs11_lib_ctx
     CK_LOCKMUTEX    lock_mutex;
     CK_UNLOCKMUTEX  unlock_mutex;
     CK_VOID_PTR     mutex;
+#if PKCS11_OS_MUTEX_ALWAYS
+    CK_VOID_PTR     os_mutex;
+#endif
     CK_VOID_PTR     slots;
     CK_ULONG        slot_cnt;
 #if !PKCS11_USE_STATIC_CONFIG

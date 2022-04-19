@@ -120,6 +120,11 @@
 #cmakedefine01 PKCS11_AUTO_ID_ENABLE
 #endif
 
+/** Always use OS mutex in addition to any custom supplied mutex */
+#ifndef PKCS11_OS_MUTEX_ALWAYS
+#cmakedefine01 PKCS11_OS_MUTEX_ALWAYS
+#endif
+
 #include "pkcs11/cryptoki.h"
 #include <stddef.h>
 typedef struct _pkcs11_slot_ctx *pkcs11_slot_ctx_ptr;

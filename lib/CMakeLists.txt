@@ -16,6 +16,7 @@ option(ATCA_HAL_SWI_UART "Include the SWI using UART Driver")
 # Library Options
 option(ATCA_PRINTF "Enable Debug print statements in library")
 option(ATCA_PKCS11 "Build PKCS11 Library")
+option(ATCA_PKCS11_FORCE_MUTEX "Force the use of OS Mutexes even if custom mutexes are provided" ON)
 option(ATCA_BUILD_SHARED_LIBS "Build CryptoAuthLib as shared library" ON)
 option(ATCA_NO_HEAP "Do not use dynamic (heap) allocation functions" OFF)
 option(ATCA_USE_ATCAB_FUNCTIONS "Build the atcab_ api functions rather than using macros" OFF)
